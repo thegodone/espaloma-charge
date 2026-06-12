@@ -1,6 +1,171 @@
 """Neural network components of espaloma charge."""
 
 import torch
+import types
+import sys
+
+
+class MoleculeGraph:
+    """Small tensor graph used by the Torch-only inference path."""
+
+    def __init__(self, ndata, edges, batch_index=None, batch_num_nodes=None):
+        self.ndata = ndata
+        self.edges = edges
+        n_nodes = next(iter(ndata.values())).shape[0] if ndata else 0
+        device = next(iter(ndata.values())).device if ndata else torch.device("cpu")
+        if batch_index is None:
+            batch_index = torch.zeros(n_nodes, dtype=torch.long, device=device)
+        if batch_num_nodes is None:
+            batch_num_nodes = torch.tensor([n_nodes], dtype=torch.long, device=device)
+        self.batch_index = batch_index
+        self.batch_num_nodes = batch_num_nodes
+
+    @property
+    def batch_size(self):
+        return int(self.batch_num_nodes.numel())
+
+    @property
+    def device(self):
+        return self.batch_index.device
+
+    def number_of_nodes(self):
+        return next(iter(self.ndata.values())).shape[0] if self.ndata else 0
+
+    def number_of_edges(self):
+        return self.edges.shape[1]
+
+    def to(self, device):
+        self.ndata = {key: value.to(device) for key, value in self.ndata.items()}
+        self.edges = self.edges.to(device)
+        self.batch_index = self.batch_index.to(device)
+        self.batch_num_nodes = self.batch_num_nodes.to(device)
+        return self
+
+    def mean_neighbors(self, x):
+        if self.edges.numel() == 0:
+            return torch.zeros_like(x)
+
+        src, dst = self.edges
+        out = torch.zeros_like(x)
+        out.index_add_(0, dst, x[src])
+        degree = torch.zeros(x.shape[0], 1, dtype=x.dtype, device=x.device)
+        degree.index_add_(0, dst, torch.ones(dst.shape[0], 1, dtype=x.dtype, device=x.device))
+        return out / degree.clamp_min(1.0)
+
+    def sum_nodes(self, key):
+        values = self.ndata[key]
+        out = torch.zeros(self.batch_size, values.shape[-1], dtype=values.dtype, device=values.device)
+        out.index_add_(0, self.batch_index, values)
+        return out
+
+    def broadcast_nodes(self, values):
+        return values[self.batch_index]
+
+
+def batch_graphs(graphs):
+    if len(graphs) == 0:
+        raise ValueError("cannot batch an empty graph list")
+
+    device = graphs[0].device
+    ndata = {
+        key: torch.cat([graph.ndata[key].to(device) for graph in graphs], dim=0)
+        for key in graphs[0].ndata
+    }
+
+    edge_blocks = []
+    batch_indices = []
+    batch_num_nodes = []
+    offset = 0
+    for batch_id, graph in enumerate(graphs):
+        n_nodes = next(iter(graph.ndata.values())).shape[0]
+        batch_num_nodes.append(n_nodes)
+        batch_indices.append(torch.full((n_nodes,), batch_id, dtype=torch.long, device=device))
+        if graph.edges.numel() > 0:
+            edge_blocks.append(graph.edges.to(device) + offset)
+        offset += n_nodes
+
+    if edge_blocks:
+        edges = torch.cat(edge_blocks, dim=1)
+    else:
+        edges = torch.empty((2, 0), dtype=torch.long, device=device)
+
+    return MoleculeGraph(
+        ndata=ndata,
+        edges=edges,
+        batch_index=torch.cat(batch_indices),
+        batch_num_nodes=torch.tensor(batch_num_nodes, dtype=torch.long, device=device),
+    )
+
+
+def unbatch_graphs(graph):
+    graphs = []
+    node_offset = 0
+    for n_nodes in graph.batch_num_nodes.tolist():
+        node_slice = slice(node_offset, node_offset + n_nodes)
+        ndata = {key: value[node_slice].clone() for key, value in graph.ndata.items()}
+
+        edge_mask = (
+            (graph.edges[0] >= node_offset)
+            & (graph.edges[0] < node_offset + n_nodes)
+            & (graph.edges[1] >= node_offset)
+            & (graph.edges[1] < node_offset + n_nodes)
+        )
+        edges = graph.edges[:, edge_mask] - node_offset
+        graphs.append(MoleculeGraph(ndata, edges))
+        node_offset += n_nodes
+    return graphs
+
+
+class TorchSAGEConv(torch.nn.Module):
+    """Torch implementation of DGL SAGEConv(mean) compatible with old checkpoints."""
+
+    def __init__(self, in_feats=None, out_feats=None, aggregator_type="mean", bias=True, feat_drop=0.0, **kwargs):
+        super().__init__()
+        if aggregator_type != "mean":
+            raise ValueError("TorchSAGEConv currently supports only mean aggregation")
+        self._aggre_type = aggregator_type
+        if in_feats is not None and out_feats is not None:
+            self.fc_self = torch.nn.Linear(in_feats, out_feats, bias=False)
+            self.fc_neigh = torch.nn.Linear(in_feats, out_feats, bias=False)
+            self.bias = torch.nn.Parameter(torch.zeros(out_feats)) if bias else None
+            self.feat_drop = torch.nn.Dropout(feat_drop)
+        self.norm = kwargs.get("norm")
+        self.activation = kwargs.get("activation")
+
+    def forward(self, g, feat, **kwargs):
+        h_self = self.feat_drop(feat) if hasattr(self, "feat_drop") else feat
+        h_neigh = g.mean_neighbors(h_self)
+        rst = self.fc_self(h_self) + self.fc_neigh(h_neigh)
+        bias = getattr(self, "bias", None)
+        if bias is not None:
+            rst = rst + bias
+        activation = getattr(self, "activation", None)
+        if activation is not None:
+            rst = activation(rst)
+        norm = getattr(self, "norm", None)
+        if norm is not None:
+            rst = norm(rst)
+        return rst
+
+
+def install_legacy_dgl_pickle_shim():
+    """Allow old DGL-pickled model.pt files to load without importing DGL."""
+
+    module_names = [
+        "dgl",
+        "dgl.nn",
+        "dgl.nn.pytorch",
+        "dgl.nn.pytorch.conv",
+        "dgl.nn.pytorch.conv.sageconv",
+    ]
+    modules = {name: sys.modules.get(name) or types.ModuleType(name) for name in module_names}
+    modules["dgl.nn.pytorch.conv.sageconv"].SAGEConv = TorchSAGEConv
+    modules["dgl.nn.pytorch.conv"].sageconv = modules["dgl.nn.pytorch.conv.sageconv"]
+    modules["dgl.nn.pytorch"].conv = modules["dgl.nn.pytorch.conv"]
+    modules["dgl.nn"].pytorch = modules["dgl.nn.pytorch"]
+    modules["dgl"].nn = modules["dgl.nn"]
+    for name, module in modules.items():
+        sys.modules[name] = module
 
 class _Sequential(torch.nn.Module):
     """Sequentially staggered neural networks."""
@@ -74,7 +239,7 @@ class Sequential(torch.nn.Module):
     Parameters
     ----------
     layer : torch.nn.Module
-        DGL graph convolution layers.
+        Graph convolution layer class. The default runtime uses ``TorchSAGEConv``.
 
     config : List
         A sequence of numbers (for units) and strings (for activation functions)
@@ -123,16 +288,14 @@ class Sequential(torch.nn.Module):
 
         Parameters
         ----------
-        g : `dgl.DGLHeteroGraph`,
+        g : `MoleculeGraph`,
             input graph
 
         Returns
         -------
-        g : `dgl.DGLHeteroGraph`
+        g : `MoleculeGraph`
             output graph
         """
-        import dgl
-
         if x is None:
             # get node attributes
             x = g.ndata["h0"]
@@ -145,6 +308,47 @@ class Sequential(torch.nn.Module):
         g.ndata["h"] = x
 
         return g
+
+def _total_charge_tensor(total_charge, batch_size, device, dtype):
+    if total_charge is None:
+        total_charge = 0.0
+
+    if isinstance(total_charge, torch.Tensor):
+        total_charge = total_charge.to(device=device, dtype=dtype)
+    else:
+        total_charge = torch.as_tensor(total_charge, device=device, dtype=dtype)
+
+    if total_charge.ndim == 0:
+        total_charge = total_charge.reshape(1).expand(batch_size)
+    else:
+        total_charge = total_charge.reshape(-1)
+        if total_charge.numel() == 1 and batch_size != 1:
+            total_charge = total_charge.expand(batch_size)
+
+    if total_charge.numel() != batch_size:
+        raise ValueError(
+            f"total_charge must be a scalar or have one value per molecule; "
+            f"got {total_charge.numel()} values for batch_size={batch_size}"
+        )
+
+    return total_charge.reshape(batch_size, 1)
+
+
+def qeq_charges(e, s, total_charge, batch_index):
+    s_inv = s ** -1
+    e_s_inv = e * s_inv
+
+    batch_size = total_charge.shape[0]
+    sum_s_inv = torch.zeros(batch_size, s.shape[-1], dtype=s.dtype, device=s.device)
+    sum_e_s_inv = torch.zeros(batch_size, e.shape[-1], dtype=e.dtype, device=e.device)
+    sum_s_inv.index_add_(0, batch_index, s_inv)
+    sum_e_s_inv.index_add_(0, batch_index, e_s_inv)
+
+    return -e * s_inv + s_inv * torch.div(
+        total_charge[batch_index] + sum_e_s_inv[batch_index],
+        sum_s_inv[batch_index],
+    )
+
 
 def get_charges(node):
     """ Solve the function to get the absolute charges of atoms in a
@@ -206,62 +410,23 @@ class ChargeEquilibrium(torch.nn.Module):
     def __init__(self):
         super(ChargeEquilibrium, self).__init__()
 
-    def forward(self, g, total_charge=0.0):
+    def forward(self, g, total_charge=None):
         """apply charge equilibrium to all molecules in batch"""
-        # calculate $s ^ {-1}$ and $ es ^ {-1}$
-        import dgl
-
-        g.apply_nodes(
-            lambda node: {"s_inv": node.data["s"] ** -1},
-        )
-
-        g.apply_nodes(
-            lambda node: {"e_s_inv": node.data["e"] * node.data["s"] ** -1},
-        )
-
-        if "q_ref" in g.ndata:
-            total_charge = dgl.sum_nodes(g, "q_ref")
+        if total_charge is None and "q_ref" in g.ndata:
+            total_charge = g.sum_nodes("q_ref")
         else:
-            total_charge = torch.ones(g.batch_size, 1, device=g.device) * total_charge
-        
-        g.ndata["sum_q"] = dgl.broadcast_nodes(g, total_charge)
+            total_charge = _total_charge_tensor(
+                total_charge,
+                batch_size=g.batch_size,
+                device=g.device,
+                dtype=g.ndata["s"].dtype,
+            )
 
-        sum_s_inv = dgl.sum_nodes(g, "s_inv")
-        sum_e_s_inv = dgl.sum_nodes(g, "e_s_inv")
-        g.ndata["sum_s_inv"] = dgl.broadcast_nodes(g, sum_s_inv)
-        g.ndata["sum_e_s_inv"] = dgl.broadcast_nodes(g, sum_e_s_inv)
-
-        # g.update_all(
-        #     dgl.function.copy_src(src="sum_q", out="m_sum_q"),
-        #     dgl.function.sum(msg="m_sum_q", out="sum_q"),
-        #     etype="g_has_n1",
-        # )
-        #
-        # # get the sum of $s^{-1}$ and $m_s^{-1}$
-        # g.update_all(
-        #     dgl.function.copy_src(src="s_inv", out="m_s_inv"),
-        #     dgl.function.sum(msg="m_s_inv", out="sum_s_inv"),
-        #     etype="n1_in_g",
-        # )
-        #
-        # g.update_all(
-        #     dgl.function.copy_src(src="e_s_inv", out="m_e_s_inv"),
-        #     dgl.function.sum(msg="m_e_s_inv", out="sum_e_s_inv"),
-        #     etype="n1_in_g",
-        # )
-        #
-        # g.update_all(
-        #     dgl.function.copy_src(src="sum_s_inv", out="m_sum_s_inv"),
-        #     dgl.function.sum(msg="m_sum_s_inv", out="sum_s_inv"),
-        #     etype="g_has_n1",
-        # )
-        #
-        # g.update_all(
-        #     dgl.function.copy_src(src="sum_e_s_inv", out="m_sum_e_s_inv"),
-        #     dgl.function.sum(msg="m_sum_e_s_inv", out="sum_e_s_inv"),
-        #     etype="g_has_n1",
-        # )
-
-        g.apply_nodes(get_charges)
+        g.ndata["q"] = qeq_charges(
+            g.ndata["e"],
+            g.ndata["s"],
+            total_charge,
+            g.batch_index,
+        )
 
         return g

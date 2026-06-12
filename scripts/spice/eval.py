@@ -1,11 +1,11 @@
 import pandas as pd
 import torch
-import dgl
 from openff.toolkit.topology import Molecule
-# dgl.use_libxsmm(False)
-class ChargeDataset(dgl.data.DGLDataset):
+
+
+class ChargeDataset(torch.utils.data.Dataset):
     def __init__(self, graphs):
-        super().__init__(name="charge_dataset")
+        super().__init__()
         self.graphs = graphs
 
     def __len__(self):
@@ -16,6 +16,7 @@ class ChargeDataset(dgl.data.DGLDataset):
 
 def run():
     from espaloma_charge.utils import from_rdkit_mol
+    from espaloma_charge.models import install_legacy_dgl_pickle_shim
     molecules = Molecule.from_file("spice.oeb", allow_undefined_stereo=True)
     from collections import defaultdict
     name2graph = defaultdict(lambda: [])
@@ -48,7 +49,8 @@ def run():
     dataset_test = ChargeDataset([item for item in name2graph[name] for name in names_test])
     smiles_test = [item for item in name2smiles[name] for name in names_test]
 
-    model = torch.load("model.pt", map_location="cpu")
+    install_legacy_dgl_pickle_shim()
+    model = torch.load("model.pt", map_location="cpu", weights_only=False)
 
     import pandas as pd
     df = pd.DataFrame(columns=["SMILES", "RMSE"])

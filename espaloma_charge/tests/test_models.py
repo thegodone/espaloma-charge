@@ -3,14 +3,13 @@ def test_import():
     from espaloma_charge.models import ChargeEquilibrium
 
 def test_sequential():
-    from functools import partial
-    import dgl
     from rdkit import Chem
     from espaloma_charge.utils import from_rdkit_mol
-    from espaloma_charge.models import Sequential
+    from espaloma_charge.models import Sequential, TorchSAGEConv
     sequential = Sequential(
-        layer=partial(dgl.nn.SAGEConv, aggregator_type="mean"),
+        layer=TorchSAGEConv,
         config=[32, "relu", 32, "relu", 32, "relu"],
+        input_units=32,
     )
     molecule = Chem.MolFromSmiles("C")
     graph = from_rdkit_mol(molecule)

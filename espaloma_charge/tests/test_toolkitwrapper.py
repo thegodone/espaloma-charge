@@ -1,9 +1,10 @@
-import dgl
-dgl.use_libxsmm(False)
+import pytest
+
+pytest.importorskip("openff")
+
 from espaloma_charge.openff_wrapper import EspalomaChargeToolkitWrapper
 from openff.toolkit import ToolkitRegistry, ForceField, RDKitToolkitWrapper
 from openff.units import unit
-import pytest
 from openff.toolkit.utils.exceptions import ChargeMethodUnavailableError
 from openff.toolkit._tests.create_molecules import create_ethanol
 

@@ -1,8 +1,8 @@
 import pandas as pd
 import torch
-import dgl
 from openff.toolkit.topology import Molecule
-dgl.use_libxsmm(False)
+
+
 class ChargeDataset(torch.utils.data.Dataset):
     def __init__(self, graphs):
         super().__init__()
@@ -16,6 +16,7 @@ class ChargeDataset(torch.utils.data.Dataset):
 
 def run(args):
     from espaloma_charge.utils import from_rdkit_mol
+    from espaloma_charge.models import batch_graphs
     molecules = Molecule.from_file(args.path, allow_undefined_stereo=True)
     from collections import defaultdict
     name2graph = defaultdict(lambda: [])
@@ -60,21 +61,20 @@ def run(args):
     
     config = [args.width, args.activation] * args.depth
     from espaloma_charge.models import (
-        Sequential, ChargeReadout, ChargeEquilibrium
+        Sequential, ChargeReadout, ChargeEquilibrium, TorchSAGEConv
     )
-    from functools import partial
     model = torch.nn.Sequential(
         Sequential(
-            layer=partial(dgl.nn.SAGEConv, aggregator_type="mean"),
+            layer=TorchSAGEConv,
             config=config,
         ),
         ChargeReadout(args.width),
         ChargeEquilibrium(),
     )
 
-    dataloader = dgl.dataloading.GraphDataLoader(dataset_train, batch_size=args.batch_size, pin_memory=True)
-    dataloader_valid = dgl.dataloading.GraphDataLoader(dataset_valid, batch_size=args.batch_size)
-    dataloader_test = dgl.dataloading.GraphDataLoader(dataset_test, batch_size=args.batch_size)
+    dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, collate_fn=batch_graphs)
+    dataloader_valid = torch.utils.data.DataLoader(dataset_valid, batch_size=args.batch_size, collate_fn=batch_graphs)
+    dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=args.batch_size, collate_fn=batch_graphs)
   
     rmse_vl_best = 9999.9
     rmse_te_best = 9999.9

@@ -21,13 +21,12 @@ If you plan on using [`openff-toolkit`](https://github.com/openforcefield/openff
 $ mamba create -n espaloma -c conda-forge espaloma_charge openff-toolkit
 ```
 
-### pypi
+### PyPI
 
-We also have `espaloma_charge` on pypi, but the `dgl` dependency must be installed first.
+The runtime uses a Torch-only inference path and does not require DGL.
 
 ```bash
-# First create a conda env with mamba, conda, or micromamba
-$ mamba create -n espaloma -c conda-forge dgl==1.1.2 pip python
+$ mamba create -n espaloma -c conda-forge "pytorch>=2.12,<2.13" pip python
 $ mamba activate espaloma
 $ pip install espaloma_charge
 ```

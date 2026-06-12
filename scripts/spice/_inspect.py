@@ -1,11 +1,11 @@
 import pandas as pd
 import torch
-import dgl
 from openff.toolkit.topology import Molecule
-# dgl.use_libxsmm(False)
-class ChargeDataset(dgl.data.DGLDataset):
+
+
+class ChargeDataset(torch.utils.data.Dataset):
     def __init__(self, graphs):
-        super().__init__(name="charge_dataset")
+        super().__init__()
         self.graphs = graphs
 
     def __len__(self):
