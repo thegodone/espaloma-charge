@@ -38,6 +38,16 @@ def open_sdf_supplier(path: Path):
     return handle, Chem.ForwardSDMolSupplier(handle, removeHs=False)
 
 
+def open_sdf_writer(path: Path | None):
+    if path is None:
+        return None, None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if str(path).endswith(".gz"):
+        handle = gzip.open(path, "wt")
+        return handle, Chem.SDWriter(handle)
+    return None, Chem.SDWriter(str(path))
+
+
 def iter_oeb_molecules(path: Path):
     try:
         from openeye import oechem
@@ -101,6 +111,15 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Directory for NPZ shards and manifest.csv.",
     )
+    parser.add_argument(
+        "--out-sdf",
+        type=Path,
+        default=None,
+        help=(
+            "Optional charged SDF/SDF.GZ sidecar. Charges are written with "
+            "the OpenFF atom.dprop.PartialCharge SD tag convention."
+        ),
+    )
     parser.add_argument("--shard-size", type=int, default=25_000)
     parser.add_argument("--max-mols", type=int, default=None)
     parser.add_argument(
@@ -117,6 +136,7 @@ def main() -> None:
 
     strict = not args.no_strict
     sdf_handle, sdf_supplier = open_sdf_supplier(args.sdf)
+    sdf_writer_handle, sdf_writer = open_sdf_writer(args.out_sdf)
 
     shard_rows: list[dict] = []
     shard_q_refs: list[np.ndarray] = []
@@ -177,12 +197,24 @@ def main() -> None:
             shard_q_refs.append(charges)
             manifest_rows.append(row | {"shard": shard_index})
 
+            if sdf_writer is not None:
+                charged_mol = Chem.Mol(rd_mol)
+                charged_mol.SetProp(
+                    "atom.dprop.PartialCharge",
+                    " ".join(f"{float(charge):.8f}" for charge in charges),
+                )
+                sdf_writer.write(charged_mol)
+
             if len(shard_rows) >= args.shard_size:
                 flush_shard(args.out_dir, shard_index, shard_rows, shard_q_refs)
                 shard_index += 1
                 shard_rows = []
                 shard_q_refs = []
     finally:
+        if sdf_writer is not None:
+            sdf_writer.close()
+        if sdf_writer_handle is not None:
+            sdf_writer_handle.close()
         sdf_handle.close()
 
     flush_shard(args.out_dir, shard_index, shard_rows, shard_q_refs)
@@ -218,6 +250,9 @@ def main() -> None:
         writer.writerow(["oeb_sha256", sha256_file(args.oeb)])
         writer.writerow(["sdf", str(args.sdf)])
         writer.writerow(["sdf_sha256", sha256_file(args.sdf)])
+        if args.out_sdf is not None:
+            writer.writerow(["charged_sdf", str(args.out_sdf)])
+            writer.writerow(["charged_sdf_sha256", sha256_file(args.out_sdf)])
         writer.writerow(["n_molecules", len(manifest_rows)])
         writer.writerow(["n_failures", len(failures)])
 

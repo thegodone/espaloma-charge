@@ -75,7 +75,8 @@ portable runtime dependency. To convert it once into compact open NPZ shards:
 $ python tools/extract_spice_oeb_charges.py \
     --oeb spice.oeb \
     --sdf spice.sdf.gz \
-    --out-dir spice_npz
+    --out-dir spice_npz \
+    --out-sdf spice_charged.sdf.gz
 ```
 
 The extraction step requires an OEB-capable OEChem environment, but model
