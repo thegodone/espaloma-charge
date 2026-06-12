@@ -11,6 +11,17 @@ from openff.toolkit.utils.utils import inherit_docstrings
 
 from espaloma_charge import charge
 
+
+def _molecule_total_charge(molecule):
+    try:
+        return float(molecule.total_charge.m_as(unit.elementary_charge))
+    except AttributeError:
+        try:
+            return float(molecule.total_charge / unit.elementary_charge)
+        except AttributeError:
+            return None
+
+
 @inherit_docstrings
 class EspalomaChargeToolkitWrapper(base_wrapper.ToolkitWrapper):
     """
@@ -61,13 +72,9 @@ class EspalomaChargeToolkitWrapper(base_wrapper.ToolkitWrapper):
             will be used.
         use_conformers : iterable of unit-wrapped numpy arrays, each with shape
             (n_atoms, 3) and dimension of distance. Optional, default = None
-            Coordinates to use for partial charge calculation. If None, an appropriate number
-            of conformers will be generated.
+            Ignored; espaloma-am1bcc is a graph-only charge method.
         strict_n_conformers : bool, default=False
-            Whether to raise an exception if an invalid number of conformers is provided for the
-            given charge method.
-            If this is False and an invalid number of conformers is found, a warning will be raised
-            instead of an Exception.
+            Ignored; conformers are accepted but not used.
         normalize_partial_charges : bool, default=True
             Whether to offset partial charges so that they sum to the total formal charge of the molecule.
             This is used to prevent accumulation of rounding errors when the partial charge generation method has
@@ -97,8 +104,8 @@ class EspalomaChargeToolkitWrapper(base_wrapper.ToolkitWrapper):
 
             _cls = Molecule
 
-        # Make a temporary copy of the molecule, since we'll be messing with its conformers
         mol_copy = _cls(molecule)
+        mol_copy._conformers = None
 
         partial_charge_method = partial_charge_method.lower()
         if partial_charge_method not in PARTIAL_CHARGE_METHODS:
@@ -108,18 +115,13 @@ class EspalomaChargeToolkitWrapper(base_wrapper.ToolkitWrapper):
                 f"{list(PARTIAL_CHARGE_METHODS.keys())}"
             )
 
-
-        self._check_n_conformers(
-            mol_copy,
-            partial_charge_method=partial_charge_method,
-            min_confs=0,
-            max_confs=0,
-            strict_n_conformers=strict_n_conformers,
-        )
-
         if partial_charge_method == "espaloma-am1bcc":
             rdmol = self._rdkit_toolkit_wrapper.to_rdkit(mol_copy)
-            partial_charges = charge(rdmol, model_url=self.model_url)
+            partial_charges = charge(
+                rdmol,
+                total_charge=_molecule_total_charge(molecule),
+                model_url=self.model_url,
+            )
             # Due to https://github.com/choderalab/espaloma_charge/issues/7 promote to float64
             import numpy as np
             partial_charges = np.array(partial_charges, dtype=np.float64)
