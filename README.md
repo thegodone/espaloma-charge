@@ -21,13 +21,12 @@ If you plan on using [`openff-toolkit`](https://github.com/openforcefield/openff
 $ mamba create -n espaloma -c conda-forge espaloma_charge openff-toolkit
 ```
 
-### pypi
+### PyPI
 
-We also have `espaloma_charge` on pypi, but the `dgl` dependency must be installed first.
+The runtime uses a Torch-only inference path and does not require DGL.
 
 ```bash
-# First create a conda env with mamba, conda, or micromamba
-$ mamba create -n espaloma -c conda-forge dgl==1.1.2 pip python
+$ mamba create -n espaloma -c conda-forge "pytorch>=2.12,<2.13" pip python
 $ mamba activate espaloma
 $ pip install espaloma_charge
 ```
@@ -68,6 +67,27 @@ $ antechamber -fi mol2 -fo mol2 -i in.mol2 -o out.mol2 -c rc -cf in.crg
 ## Training data
 
 A minimal dataset for training the model can be found in https://doi.org/10.5281/zenodo.17308526
+
+The Zenodo OEB file contains the reference partial charges, but OEB is not a
+portable runtime dependency. To convert it once into compact open NPZ shards:
+
+```bash
+$ python tools/extract_spice_oeb_charges.py \
+    --oeb spice.oeb \
+    --sdf spice.sdf.gz \
+    --out-dir spice_npz \
+    --out-sdf spice_charged.sdf.gz
+```
+
+The extraction step requires an OEB-capable OEChem environment, but model
+evaluation from the NPZ shards does not:
+
+```bash
+$ python tools/evaluate_spice_npz.py \
+    --charges spice_npz \
+    --sdf spice.sdf.gz \
+    --model model.pt
+```
 
 ## Training instructions
 

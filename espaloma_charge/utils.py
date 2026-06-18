@@ -14,6 +14,14 @@ SUPPORTED_ELEMENTS = [
 ]
 
 
+def _explicit_valence(atom):
+    from rdkit import Chem
+
+    if hasattr(atom, "GetValence") and hasattr(Chem, "ValenceType"):
+        return atom.GetValence(Chem.ValenceType.EXPLICIT)
+    return atom.GetExplicitValence()
+
+
 def fp_rdkit(atom):
     from rdkit import Chem
 
@@ -21,6 +29,7 @@ def fp_rdkit(atom):
     if element not in SUPPORTED_ELEMENTS:
         raise ValueError(f"Element {element} is not supported.")
 
+    hybridization_fallback = torch.zeros(5, dtype=torch.get_default_dtype())
     HYBRIDIZATION_RDKIT = {
         Chem.rdchem.HybridizationType.SP: torch.tensor(
             [1, 0, 0, 0, 0],
@@ -57,7 +66,7 @@ def fp_rdkit(atom):
                 [
                     atom.GetTotalDegree(),
                     atom.GetTotalValence(),
-                    atom.GetExplicitValence(),
+                    _explicit_valence(atom),
                     # atom.GetFormalCharge(),
                     atom.GetIsAromatic() * 1.0,
                     atom.GetMass(),
@@ -70,33 +79,28 @@ def fp_rdkit(atom):
                 ],
                 dtype=torch.get_default_dtype(),
             ),
-            HYBRIDIZATION_RDKIT[atom.GetHybridization()],
+            HYBRIDIZATION_RDKIT.get(atom.GetHybridization(), hybridization_fallback),
         ],
         dim=0,
     )
 
 
 def from_rdkit_mol(mol, use_fp=True):
-    import dgl
-    from rdkit import Chem
-
-    # initialize graph
-    g = dgl.DGLGraph()
+    from .models import MoleculeGraph
 
     # enter nodes
     n_atoms = mol.GetNumAtoms()
-    g.add_nodes(n_atoms)
-    g.ndata["type"] = torch.Tensor(
+    atom_type = torch.tensor(
         [[atom.GetAtomicNum()] for atom in mol.GetAtoms()]
     )
-    g.ndata["q_ref"] = torch.Tensor(
+    q_ref = torch.tensor(
         [[atom.GetFormalCharge()] for atom in mol.GetAtoms()]
     )
-    h_v = torch.zeros(g.ndata["type"].shape[0], 100, dtype=torch.float32)
+    h_v = torch.zeros(atom_type.shape[0], 100, dtype=torch.float32)
 
     h_v[
-        torch.arange(g.ndata["type"].shape[0]),
-        torch.squeeze(g.ndata["type"]).long(),
+        torch.arange(atom_type.shape[0]),
+        torch.squeeze(atom_type).long(),
     ] = 1.0
 
     h_v_fp = torch.stack([fp_rdkit(atom) for atom in mol.GetAtoms()], axis=0)
@@ -104,18 +108,19 @@ def from_rdkit_mol(mol, use_fp=True):
     if use_fp == True:
         h_v = torch.cat([h_v, h_v_fp], dim=-1)  # (n_atoms, 117)
 
-    g.ndata["h0"] = h_v
-
     # enter bonds
     bonds = list(mol.GetBonds())
     bonds_begin_idxs = [bond.GetBeginAtomIdx() for bond in bonds]
     bonds_end_idxs = [bond.GetEndAtomIdx() for bond in bonds]
-    bonds_types = [bond.GetBondType().real for bond in bonds]
+    src = bonds_begin_idxs + bonds_end_idxs
+    dst = bonds_end_idxs + bonds_begin_idxs
+    edges = torch.tensor([src, dst], dtype=torch.long)
 
-    # NOTE: dgl edges are directional
-    g.add_edges(bonds_begin_idxs, bonds_end_idxs)
-    g.add_edges(bonds_end_idxs, bonds_begin_idxs)
-
-    # g.edata["type"] = torch.Tensor(bonds_types)[:, None].repeat(2, 1)
-
-    return g
+    return MoleculeGraph(
+        ndata={
+            "type": atom_type,
+            "q_ref": q_ref,
+            "h0": h_v,
+        },
+        edges=edges,
+    )

@@ -1,11 +1,11 @@
 import pandas as pd
 import torch
-import dgl
 from openff.toolkit.topology import Molecule
-dgl.use_libxsmm(False)
-class ChargeDataset(dgl.data.DGLDataset):
+
+
+class ChargeDataset(torch.utils.data.Dataset):
     def __init__(self, graphs):
-        super().__init__(name="charge_dataset")
+        super().__init__()
         self.graphs = graphs
 
     def __len__(self):
@@ -16,6 +16,7 @@ class ChargeDataset(dgl.data.DGLDataset):
 
 def run(args):
     from espaloma_charge.utils import from_rdkit_mol
+    from espaloma_charge.models import batch_graphs
     molecules = Molecule.from_file(args.path, allow_undefined_stereo=True)
     graphs = [from_rdkit_mol(molecule.to_rdkit()) for molecule in molecules]
     charges = [molecule.partial_charges for molecule in molecules]
@@ -24,12 +25,11 @@ def run(args):
 
     config = [args.width, args.activation] * args.depth
     from espaloma_charge.models import (
-        Sequential, ChargeReadout, ChargeEquilibrium
+        Sequential, ChargeReadout, ChargeEquilibrium, TorchSAGEConv
     )
-    from functools import partial
     model = torch.nn.Sequential(
         Sequential(
-            layer=partial(dgl.nn.SAGEConv, aggregator_type="mean"),
+            layer=TorchSAGEConv,
             config=config,
         ),
         ChargeReadout(args.width),
@@ -37,11 +37,17 @@ def run(args):
     )
 
     dataset = ChargeDataset(graphs)
-    dataset_train, dataset_valid, dataset_test = dgl.data.utils.split_dataset(dataset, random_state=2666)
-    dataloader = dgl.dataloading.GraphDataLoader(dataset_train, batch_size=args.batch_size, pin_memory=True)
+    generator = torch.Generator().manual_seed(2666)
+    n_train = int(0.8 * len(dataset))
+    n_valid = int(0.1 * len(dataset))
+    n_test = len(dataset) - n_train - n_valid
+    dataset_train, dataset_valid, dataset_test = torch.utils.data.random_split(
+        dataset, [n_train, n_valid, n_test], generator=generator
+    )
+    dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, collate_fn=batch_graphs)
 
-    dataloader_valid = dgl.dataloading.GraphDataLoader(dataset_valid, batch_size=args.batch_size)
-    dataloader_test = dgl.dataloading.GraphDataLoader(dataset_test, batch_size=args.batch_size)
+    dataloader_valid = torch.utils.data.DataLoader(dataset_valid, batch_size=args.batch_size, collate_fn=batch_graphs)
+    dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=args.batch_size, collate_fn=batch_graphs)
     
 
     rmse_vl_best = 9999.9
